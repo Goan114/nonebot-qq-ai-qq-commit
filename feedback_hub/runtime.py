@@ -10,6 +10,7 @@ from .config import Settings
 from .db import Database
 from .github import GitHub
 from .service import Service
+from .vision import Vision
 
 log = logging.getLogger("feedback_hub")
 
@@ -20,6 +21,7 @@ class Runtime:
         self.db = Database(settings.feedback_database)
         self.client = httpx.AsyncClient(timeout=30, follow_redirects=False)
         self.service = Service(self.db, settings, AI(settings, self.client), superusers)
+        self.service.vision = Vision(settings, self.client, self.service.vision_state)
         self.github = GitHub(self.db, settings, self.client)
         self.sender = sender
         self.monitor_enabled = False

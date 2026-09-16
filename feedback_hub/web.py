@@ -43,6 +43,11 @@ class RepoBody(BaseModel):
     repo_key: str
 
 
+class VisionBody(BaseModel):
+    enabled: bool
+    model: str | None = Field(default=None, max_length=200)
+
+
 def create_router(runtime):
     router = APIRouter(prefix="/feedback")
     db, service, config = runtime.db, runtime.service, runtime.settings
@@ -86,6 +91,7 @@ def create_router(runtime):
             "monitor_enabled": runtime.monitor_enabled,
             "ai_configured": bool(config.feedback_ai_key.get_secret_value() and config.feedback_ai_model),
             "auto_resolve": config.feedback_auto_resolve,
+            "vision": service.vision_state(),
             "repos": [
                 {
                     **r.model_dump(),
@@ -103,6 +109,14 @@ def create_router(runtime):
             "total": db.one("SELECT COUNT(*) n FROM issues WHERE ?='' OR status=?", (status, status))["n"],
         }
 
+    @api.put("/vision")
+    async def configure_vision(body: VisionBody):
+        try:
+            service.set_vision(body.enabled, body.model, "web-admin")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return service.vision_state()
+
     @api.get("/issues/{issue_id}")
     async def detail(issue_id: int, offset: int = Query(0, ge=0)):
         issue = db.one("SELECT * FROM issues WHERE id=?", (issue_id,))
@@ -115,6 +129,13 @@ def create_router(runtime):
                 (issue_id, offset),
             ),
             "total": db.one("SELECT COUNT(*) n FROM reports WHERE issue_id=?", (issue_id,))["n"],
+            "screenshots": db.rows(
+                "SELECT s.id,s.report_id,s.original,s.model,s.analysis,s.created,r.qq "
+                "FROM screenshots s JOIN reports r ON r.id=s.report_id WHERE r.id IN "
+                "(SELECT id FROM reports WHERE issue_id=? ORDER BY id DESC LIMIT 100 OFFSET ?) "
+                "ORDER BY s.id DESC",
+                (issue_id, offset),
+            ),
         }
 
     @api.put("/issues/{issue_id}/comment")

@@ -1,10 +1,26 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class VisionAnalysis(StrictModel):
+    related: bool
+    confidence: float = Field(ge=0, le=1)
+    summary: str = Field(min_length=1, max_length=1500)
+    visible_text: str = Field(default="", max_length=3000)
+    observations: list[str] = Field(default_factory=list, max_length=10)
+    limitations: str = Field(default="", max_length=1000)
+
+    @field_validator("observations")
+    @classmethod
+    def bounded_observations(cls, values):
+        if any(len(value) > 500 for value in values):
+            raise ValueError("截图观察条目过长")
+        return values
 
 
 class Triage(StrictModel):

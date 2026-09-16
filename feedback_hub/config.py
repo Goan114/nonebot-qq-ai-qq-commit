@@ -20,6 +20,14 @@ class Settings(BaseModel):
     feedback_ai_base_url: str = "https://api.openai.com/v1"
     feedback_ai_key: SecretStr = SecretStr("")
     feedback_ai_model: str = ""
+    feedback_vision_enabled: bool = False
+    feedback_vision_base_url: str = ""
+    feedback_vision_key: SecretStr = SecretStr("")
+    feedback_vision_model: str = ""
+    feedback_vision_models: list[str] = Field(default_factory=list)
+    feedback_vision_max_images: int = Field(default=3, ge=1, le=5)
+    feedback_vision_max_bytes: int = Field(default=5_000_000, ge=1024, le=20_000_000)
+    feedback_vision_image_hosts: set[str] = {"multimedia.nt.qq.com", "gchat.qpic.cn", "c2cpicdw.qpic.cn"}
     feedback_admin_token: SecretStr = SecretStr("")
     feedback_webhook_secret: SecretStr = SecretStr("")
     feedback_github_token: SecretStr = SecretStr("")

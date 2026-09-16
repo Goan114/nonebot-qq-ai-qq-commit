@@ -23,11 +23,19 @@ async function load(){
  $("stats").replaceChildren(metric(overview.issues,"问题总数","多个仓库共用的问题库"),metric(overview.reporters,"反馈成员","按 QQ 去重统计"),metric(overview.reports,"有效反馈","保留原文与设备信息"),metric(overview.statuses.find(s=>s.status==="resolved")?.n||0,"上游已修复","已确认代码层面的修复"));
  $("heading").textContent=names[view];$("toolbar").replaceChildren();$("content").replaceChildren();
  if(!overview.ai_configured)$("content").append(el("div","AI 尚未配置，反馈会等待处理。请填写 AI 地址、密钥和模型后重启。","status-note"));
+ const vision=overview.vision;
+ if(vision){const controls=el("div",undefined,"panel"),models=el("select");models.setAttribute("aria-label","视觉模型");
+  vision.models.forEach(m=>{const o=el("option",m);o.value=m;models.append(o)});models.value=vision.model;
+  controls.append(el("h3",`截图视觉分析 · ${vision.enabled?"已开启":"已关闭"}`),el("p","仅分析与反馈同条发送或通过 /反馈补图 明确关联的截图。切换后立即生效。","muted"),models,
+   button("保存模型",async()=>{await api("vision","PUT",{enabled:vision.enabled,model:models.value});await load();}),
+   button(vision.enabled?"关闭视觉分析":"开启视觉分析",async()=>{await api("vision","PUT",{enabled:!vision.enabled,model:models.value||null});await load();}));
+  if(!vision.configured)controls.append(el("p","请先在配置中填写视觉模型和 API 密钥。","muted"));$("toolbar").append(controls);}
  await renderers[view]();
 }
 async function issueDetail(id,offset=0){
  const d=await api(`issues/${id}?offset=${offset}`),box=$("detail-content");box.replaceChildren();box.append(el("div","问题 #"+id,"eyebrow"),el("h2",d.issue.title),badge(d.issue.status),el("p",d.issue.summary));
  if(d.issue.resolution)box.append(el("pre",d.issue.resolution));
+ if(d.screenshots?.length){box.append(el("h3","关联截图的视觉分析"));d.screenshots.forEach(s=>{const a=JSON.parse(s.analysis),n=el("div",undefined,"report");n.append(el("div",`截图记录 #${s.id} · 反馈 #${s.report_id} · QQ ${s.qq} · 模型 ${s.model}`,"muted"),el("p",a.related&&a.confidence>=0.85?"已关联问题":"关联不明确，仅保存分析记录"),el("pre",s.original),el("p",a.summary),el("pre",a.visible_text||"未识别到文字"));a.observations.forEach(o=>n.append(el("p",o)));if(a.limitations)n.append(el("p",a.limitations,"muted"));box.append(n)});}
  const text=el("textarea");text.value=d.issue.comment;text.placeholder="管理员评论：后续同类反馈会直接收到此说明";
  const select=el("select");["open","deferred","archived"].forEach(s=>{const o=el("option",labels[s]);o.value=s;select.append(o)});select.value=d.issue.status==="resolved"?"open":d.issue.status;
  box.append(text);const actions=el("div",undefined,"actions");actions.append(select,button("保存评论与状态",async()=>{await api(`issues/${id}/comment`,"PUT",{comment:text.value,status:select.value});await issueDetail(id,offset);await load();},"primary"),button("重新打开",async()=>{await api(`issues/${id}/reopen`,"POST");await issueDetail(id,offset);await load();}));box.append(actions,el("h3",`反馈原文 · ${d.total} 条`));

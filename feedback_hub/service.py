@@ -1,15 +1,149 @@
 import json
 import time
 
+import httpx
+
 from .ai import AI
 from .config import Settings
 from .db import Database
+from .vision import VisionDisabled, image_segments
 
 
 class Service:
     def __init__(self, db: Database, settings: Settings, ai: AI, superusers: set[str] | None = None):
         self.db, self.settings, self.ai = db, settings, ai
         self.superusers = superusers or set()
+        self.vision = None
+
+    def vision_state(self):
+        enabled = self.db.one("SELECT value FROM runtime_settings WHERE key='vision_enabled'")
+        selected = self.db.one("SELECT value FROM runtime_settings WHERE key='vision_model'")
+        models = list(
+            dict.fromkeys(
+                [m for m in [self.settings.feedback_vision_model, *self.settings.feedback_vision_models] if m]
+            )
+        )
+        model = (
+            selected["value"]
+            if selected and selected["value"] in models
+            else self.settings.feedback_vision_model
+        )
+        return {
+            "enabled": enabled["value"] == "true" if enabled else self.settings.feedback_vision_enabled,
+            "model": model,
+            "models": models,
+            "configured": bool(
+                model
+                and (
+                    self.settings.feedback_vision_key.get_secret_value()
+                    or self.settings.feedback_ai_key.get_secret_value()
+                )
+            ),
+        }
+
+    def set_vision(self, enabled: bool, model: str | None, actor: str):
+        current = self.vision_state()
+        selected = current["model"] if model is None else model
+        if selected and selected not in current["models"]:
+            raise ValueError("视觉模型必须来自配置的可选模型列表")
+        if enabled and (
+            not selected
+            or not (
+                self.settings.feedback_vision_key.get_secret_value()
+                or self.settings.feedback_ai_key.get_secret_value()
+            )
+        ):
+            raise ValueError("请先配置视觉模型和 API 密钥")
+        with self.db.transaction():
+            for key, value in [
+                ("vision_enabled", "true" if enabled else "false"),
+                ("vision_model", selected),
+            ]:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO runtime_settings(key,value) VALUES(?,?)", (key, value)
+                )
+            self.db.audit(actor, "vision_settings", {"enabled": enabled, "model": selected})
+
+    async def analyze_images(self, text: str, segments: list):
+        if not image_segments(segments):
+            return None, ""
+        if not self.vision_state()["enabled"] or self.vision is None:
+            return None, "视觉分析未开启，本次仅处理文字。"
+        try:
+            analysis, model = await self.vision.analyze(text, segments)
+            return {"model": model, "analysis": analysis.model_dump()}, (
+                "截图已分析并关联到反馈。"
+                if analysis.related and analysis.confidence >= 0.85
+                else "截图与问题的关联不明确，未用作分类或修复依据。"
+            )
+        except VisionDisabled:
+            return None, "视觉分析已关闭，本次仅处理文字。"
+        except (httpx.HTTPError, ValueError, RuntimeError, OSError) as exc:
+            self.db.audit("vision", "analysis_failed", {"error": type(exc).__name__})
+            return None, "截图分析失败，本次仅处理文字；请检查图片来源、大小和视觉模型配置后重新补图。"
+
+    def save_screenshot(self, report_id: int, job: dict, data: dict):
+        self.db.execute(
+            "INSERT INTO screenshots(report_id,job_id,original,segments,model,analysis,created) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (
+                report_id,
+                job["id"],
+                job["data"]["text"],
+                json.dumps(job["data"]["segments"], ensure_ascii=False),
+                data["model"],
+                json.dumps(data["analysis"], ensure_ascii=False),
+                time.time(),
+            ),
+        )
+
+    def owned_report(self, issue_id: int, qq: str, group: str):
+        return self.db.one(
+            "SELECT r.* FROM reports r JOIN issues i ON i.id=r.issue_id "
+            "WHERE r.issue_id=? AND r.qq=? AND r.group_id=? AND i.status IN ('open','deferred') "
+            "ORDER BY r.id DESC LIMIT 1",
+            (issue_id, qq, group),
+        )
+
+    async def process_supplement(self, job: dict):
+        p = job["data"]
+        report = self.db.one(
+            "SELECT * FROM reports WHERE id=? AND qq=? AND group_id=?", (p["report_id"], p["qq"], p["group"])
+        )
+        if not report or not self.owned_report(p["issue_id"], p["qq"], p["group"]):
+            self.reply(job, "原反馈已删除或问题已关闭，未追加截图。")
+            self.db.done(job["id"])
+            return
+        data, note = await self.analyze_images(
+            "原始反馈：" + report["original"] + "\n本次补充：" + p["text"], p["segments"]
+        )
+        with self.db.transaction():
+            current = self.db.one("SELECT state FROM jobs WHERE id=?", (job["id"],))
+            if current["state"] != "pending" or self.db.blocked(p["qq"]):
+                return
+            if not self.db.one("SELECT id FROM reports WHERE id=?", (report["id"],)) or not self.owned_report(
+                p["issue_id"], p["qq"], p["group"]
+            ):
+                self.db.done(job["id"])
+                return
+            if data and self.vision_state()["enabled"]:
+                self.save_screenshot(report["id"], job, data)
+                self.db.execute("UPDATE issues SET updated=? WHERE id=?", (time.time(), p["issue_id"]))
+            self.reply(job, f"问题 #{p['issue_id']}：{note}")
+            self.db.done(job["id"])
+
+    def screenshot_context(self, issue_id: int):
+        rows = self.db.rows(
+            "SELECT s.analysis FROM screenshots s JOIN reports r ON r.id=s.report_id "
+            "WHERE r.issue_id=? AND json_extract(s.analysis,'$.related')=1 "
+            "AND json_extract(s.analysis,'$.confidence')>=0.85 ORDER BY s.id DESC LIMIT 3",
+            (issue_id,),
+        )
+        return [
+            data
+            for row in rows
+            if (data := json.loads(row["analysis"]))["related"] and data["confidence"] >= 0.85
+        ]
 
     def notify(
         self,
@@ -48,9 +182,19 @@ class Service:
         text: str,
         segments: list,
         explicit: bool = False,
+        issue_id: int | None = None,
     ) -> str:
         if group not in self.settings.feedback_groups or self.db.blocked(qq):
             return "ignored"
+        report = None
+        if issue_id is not None:
+            if not self.vision_state()["enabled"]:
+                return "视觉分析未开启，请联系机器人管理员。"
+            if not image_segments(segments):
+                return "请在补图命令同一条消息中附上截图。"
+            report = self.owned_report(issue_id, qq, group)
+            if not report:
+                return "只能为你在本群提交过的未解决问题补图。"
         if (
             not explicit
             and not self.settings.feedback_listen_all
@@ -85,6 +229,8 @@ class Service:
                 "text": text,
                 "segments": segments,
                 "explicit": explicit,
+                "issue_id": issue_id,
+                "report_id": report["id"] if report else None,
             },
         )
         return "queued"
@@ -114,7 +260,18 @@ class Service:
         if self.db.blocked(p["qq"]):
             self.db.done(job["id"])
             return
+        if p.get("issue_id") is not None:
+            await self.process_supplement(job)
+            return
         result = await self.ai.triage(p["text"])
+        visual, visual_note = None, ""
+        if result.kind == "feedback" and image_segments(p["segments"]):
+            visual, visual_note = await self.analyze_images(p["text"], p["segments"])
+            if visual and visual["analysis"]["related"] and visual["analysis"]["confidence"] >= 0.85:
+                refined = await self.ai.triage(p["text"], vision=visual["analysis"])
+                # Images can enrich a valid feedback, but can never escalate to an automatic ban.
+                if refined.kind == "feedback" and self.vision_state()["enabled"]:
+                    result = refined
         issue_id, faq_id = None, None
         if result.kind == "feedback":
             issue_id, faq_id = await self.find_match({"original": p["text"], **result.model_dump()})
@@ -189,10 +346,14 @@ class Service:
                         ),
                     ).lastrowid
                     self.db.execute("UPDATE issues SET updated=? WHERE id=?", (now, issue_id))
+                    if visual and self.vision_state()["enabled"]:
+                        self.save_screenshot(report_id, job, visual)
                     count = self.db.one(
                         "SELECT COUNT(DISTINCT qq) n FROM reports WHERE issue_id=?", (issue_id,)
                     )["n"]
                     response = f"已记录反馈 #{issue_id}：{result.title}。已有 {count} 位成员反馈同类问题。"
+                    if visual_note:
+                        response += "\n" + visual_note
                     if issue and issue["comment"]:
                         response += "\n管理员说明：" + issue["comment"]
                     self.notify(
@@ -237,6 +398,7 @@ class Service:
             reports = self.db.rows("SELECT id,issue_id FROM reports WHERE " + where, args)
             count = self.db.execute("DELETE FROM reports WHERE " + where, args).rowcount
             for report in reports:
+                self.db.execute("UPDATE issues SET updated=? WHERE id=?", (time.time(), report["issue_id"]))
                 self.db.execute(
                     "UPDATE jobs SET state='cancelled' WHERE kind='send' AND "
                     "state IN ('pending','failed') AND json_extract(payload,'$.report_id')=?",
@@ -348,6 +510,8 @@ class Service:
             FROM issues i JOIN reports r ON r.issue_id=i.id
             WHERE i.status IN ('open','deferred') GROUP BY i.id""")
         snapshots = {i["id"]: i for i in issues}
+        for issue in issues:
+            issue["screenshots"] = self.screenshot_context(issue["id"])
         analyses = []
         for start in range(0, max(1, len(issues)), 20):
             batch = issues[start : start + 20]

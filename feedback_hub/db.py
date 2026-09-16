@@ -49,7 +49,16 @@ CREATE TABLE IF NOT EXISTS proposals (
 CREATE TABLE IF NOT EXISTS audit (
  id INTEGER PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, created REAL NOT NULL
 );
-PRAGMA user_version=1;
+CREATE TABLE IF NOT EXISTS runtime_settings (
+ key TEXT PRIMARY KEY, value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS screenshots (
+ id INTEGER PRIMARY KEY, report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+ job_id INTEGER NOT NULL UNIQUE, original TEXT NOT NULL, segments TEXT NOT NULL,
+ model TEXT NOT NULL, analysis TEXT NOT NULL, created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS screenshots_report ON screenshots(report_id);
+PRAGMA user_version=2;
 """
 
 
@@ -63,7 +72,7 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=5000")
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 1:
+        if version > 2:
             raise RuntimeError("数据库版本高于当前程序，拒绝降级打开")
         self.conn.executescript(SCHEMA)
 

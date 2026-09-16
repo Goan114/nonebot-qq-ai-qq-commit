@@ -64,6 +64,7 @@ async def allowed(event: GroupMessageEvent) -> bool:
 
 
 feedback = on_command("反馈", rule=allowed, priority=10, block=True)
+supplement = on_command("反馈补图", rule=allowed, priority=9, block=True)
 listener = on_message(rule=allowed, priority=90, block=False)
 admin = on_command("反馈管理", permission=SUPERUSER, priority=1, block=True)
 
@@ -99,6 +100,25 @@ async def handle_message(bot: Bot, event: GroupMessageEvent):
     await submit(bot, event, False)
 
 
+@supplement.handle()
+async def handle_supplement(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):  # noqa: B008
+    parts = args.extract_plain_text().strip().split(maxsplit=1)
+    if not parts or not parts[0].isdigit():
+        await supplement.finish(MessageSegment.text("用法：/反馈补图 问题ID [补充说明]，并在同条消息附图。"))
+    result = runtime.service.ingest(
+        qq=str(event.user_id),
+        group=str(event.group_id),
+        bot=bot.self_id,
+        message_id=str(event.message_id),
+        text=event.get_plaintext(),
+        segments=[{"type": seg.type, "data": seg.data} for seg in event.message],
+        explicit=True,
+        issue_id=int(parts[0]),
+    )
+    if result not in {"ignored", "duplicate"}:
+        await supplement.finish(MessageSegment.text("截图已加入分析队列。" if result == "queued" else result))
+
+
 HELP = """仅机器人 SUPERUSERS 可执行：
 /反馈管理 拉黑 QQ 原因
 /反馈管理 解封 QQ
@@ -107,6 +127,8 @@ HELP = """仅机器人 SUPERUSERS 可执行：
 /反馈管理 重开 问题ID
 /反馈管理 确认修复 建议ID
 /反馈管理 列表
+/反馈管理 视觉 开启 或 关闭 或 状态
+/反馈管理 视觉模型 模型名
 完整原文、FAQ、修复依据及失败重试请使用 /feedback/ WebUI。"""
 
 
@@ -116,7 +138,20 @@ async def handle_admin(event: MessageEvent, args: Message = CommandArg()):  # no
     actor = str(event.user_id)
     response = HELP
     try:
-        if parts and parts[0] in {"拉黑", "解封", "删除"}:
+        if parts and parts[0] == "视觉":
+            action = parts[1] if len(parts) > 1 else "状态"
+            if action in {"开启", "关闭"}:
+                runtime.service.set_vision(action == "开启", None, actor)
+            elif action != "状态":
+                raise ValueError("用法：/反馈管理 视觉 开启、关闭或状态")
+            state = runtime.service.vision_state()
+            response = (
+                f"视觉分析：{'开启' if state['enabled'] else '关闭'}；模型：{state['model'] or '未配置'}"
+            )
+        elif parts and parts[0] == "视觉模型" and len(parts) >= 2:
+            runtime.service.set_vision(runtime.service.vision_state()["enabled"], parts[1], actor)
+            response = "视觉模型已切换为：" + parts[1]
+        elif parts and parts[0] in {"拉黑", "解封", "删除"}:
             if len(parts) < 2 or not re.fullmatch(r"[0-9]{5,20}", parts[1]):
                 raise ValueError("请输入有效 QQ 号")
             qq = parts[1]
