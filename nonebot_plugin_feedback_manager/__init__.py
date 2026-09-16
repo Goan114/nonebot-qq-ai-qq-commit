@@ -81,7 +81,9 @@ async def submit(bot: Bot, event: GroupMessageEvent, explicit: bool):
         explicit=explicit,
     )
     if result not in {"queued", "ignored", "duplicate"}:
-        await bot.send(event, MessageSegment.text(result), at_sender=True)
+        runtime.service.notice(
+            str(event.user_id), str(event.group_id), bot.self_id, str(event.message_id), result
+        )
 
 
 @feedback.handle()
@@ -104,7 +106,14 @@ async def handle_message(bot: Bot, event: GroupMessageEvent):
 async def handle_supplement(bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()):  # noqa: B008
     parts = args.extract_plain_text().strip().split(maxsplit=1)
     if not parts or not parts[0].isdigit():
-        await supplement.finish(MessageSegment.text("用法：/反馈补图 问题ID [补充说明]，并在同条消息附图。"))
+        runtime.service.notice(
+            str(event.user_id),
+            str(event.group_id),
+            bot.self_id,
+            str(event.message_id),
+            "用法：/反馈补图 问题ID [补充说明]，并在同条消息附图。",
+        )
+        await supplement.finish()
     result = runtime.service.ingest(
         qq=str(event.user_id),
         group=str(event.group_id),
@@ -116,7 +125,14 @@ async def handle_supplement(bot: Bot, event: GroupMessageEvent, args: Message = 
         issue_id=int(parts[0]),
     )
     if result not in {"ignored", "duplicate"}:
-        await supplement.finish(MessageSegment.text("截图已加入分析队列。" if result == "queued" else result))
+        runtime.service.notice(
+            str(event.user_id),
+            str(event.group_id),
+            bot.self_id,
+            str(event.message_id),
+            "截图已加入分析队列。" if result == "queued" else result,
+        )
+        await supplement.finish()
 
 
 HELP = """仅机器人 SUPERUSERS 可执行：
@@ -133,7 +149,7 @@ HELP = """仅机器人 SUPERUSERS 可执行：
 
 
 @admin.handle()
-async def handle_admin(event: MessageEvent, args: Message = CommandArg()):  # noqa: B008
+async def handle_admin(bot: Bot, event: MessageEvent, args: Message = CommandArg()):  # noqa: B008
     parts = args.extract_plain_text().strip().split(maxsplit=2)
     actor = str(event.user_id)
     response = HELP
@@ -184,4 +200,13 @@ async def handle_admin(event: MessageEvent, args: Message = CommandArg()):  # no
             response = response or "暂无反馈。"
     except ValueError as exc:
         response = str(exc)
+    if isinstance(event, GroupMessageEvent) and str(event.group_id) in settings.feedback_groups:
+        runtime.service.notify(
+            f"admin:{bot.self_id}:{event.group_id}:{event.message_id}",
+            str(event.group_id),
+            response,
+            str(event.user_id),
+            bot.self_id,
+        )
+        await admin.finish()
     await admin.finish(MessageSegment.text(response))

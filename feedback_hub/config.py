@@ -52,6 +52,7 @@ class Settings(BaseModel):
         "失败",
     ]
     feedback_cooldown_seconds: int = Field(default=30, ge=0)
+    feedback_send_cooldown_seconds: int = Field(default=10, ge=0, le=3600)
     feedback_max_message_chars: int = Field(default=6000, ge=100, le=20000)
     feedback_max_pending: int = Field(default=1000, ge=10)
     feedback_history_pages: int = Field(default=100, ge=1, le=1000)

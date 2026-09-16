@@ -46,6 +46,20 @@ class Runtime:
         row = self.db.one("SELECT state FROM jobs WHERE id=?", (job["id"],))
         return row and row["state"] == "pending"
 
+    def defer_group(self, group: str, until: float):
+        self.db.execute(
+            "UPDATE jobs SET next_at=MAX(next_at,?) WHERE kind='send' AND state='pending' "
+            "AND json_extract(payload,'$.group')=?",
+            (until, group),
+        )
+
+    def record_send(self, group: str):
+        now = time.time()
+        self.db.execute(
+            "INSERT OR REPLACE INTO runtime_settings(key,value) VALUES(?,?)", ("send_last:" + group, str(now))
+        )
+        self.defer_group(group, now + self.settings.feedback_send_cooldown_seconds)
+
     async def process(self, job):
         job["data"] = json.loads(job["payload"])
         if job["kind"] == "feedback":
@@ -53,6 +67,8 @@ class Runtime:
         elif job["kind"] == "commit":
             await self.service.analyze_commit(job, self.github)
         else:
+            if not self.active(job):
+                return
             p = job["data"]
             qq = p.get("qq", "")
             if p["group"] not in self.settings.feedback_groups or (qq and self.db.blocked(qq)):
@@ -68,8 +84,17 @@ class Runtime:
             ):
                 self.db.done(job["id"])
                 return
+            last = self.db.one("SELECT value FROM runtime_settings WHERE key=?", ("send_last:" + p["group"],))
+            ready = float(last["value"]) + self.settings.feedback_send_cooldown_seconds if last else 0
+            if time.time() < ready:
+                self.defer_group(p["group"], ready)
+                return
+            # Pace attempts too: even a failing transport must not be hammered by a backlog.
+            self.record_send(p["group"])
             await self.sender(p)
-            self.db.done(job["id"])
+            with self.db.transaction():
+                self.db.done(job["id"])
+                self.record_send(p["group"])
 
     async def work(self, kind: str):
         while True:

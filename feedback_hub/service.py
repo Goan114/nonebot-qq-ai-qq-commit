@@ -172,6 +172,21 @@ class Service:
         p = job["data"]
         self.notify(f"{job['dedup']}:{suffix}", p["group"], text, p["qq"], p["bot"])
 
+    def notice(self, qq: str, group: str, bot: str, message_id: str, text: str):
+        # Keep at most one pending immediate warning/ack per member per group.
+        if self.db.one(
+            "SELECT id FROM jobs WHERE kind='send' AND state='pending' "
+            "AND json_extract(payload,'$.notice')=1 AND json_extract(payload,'$.group')=? "
+            "AND json_extract(payload,'$.qq')=?",
+            (group, qq),
+        ):
+            return
+        self.db.enqueue(
+            "send",
+            f"notice:{bot}:{group}:{message_id}",
+            {"group": group, "qq": qq, "bot": bot, "text": text, "notice": True},
+        )
+
     def ingest(
         self,
         *,

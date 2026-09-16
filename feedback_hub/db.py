@@ -127,7 +127,7 @@ class Database:
     def fail_job(self, job: dict, error: str):
         attempts = job["attempts"] + 1
         self.execute(
-            "UPDATE jobs SET state=?,attempts=?,next_at=?,error=? WHERE id=?",
+            "UPDATE jobs SET state=?,attempts=?,next_at=MAX(next_at,?),error=? WHERE id=?",
             (
                 "failed" if attempts >= 8 else "pending",
                 attempts,
