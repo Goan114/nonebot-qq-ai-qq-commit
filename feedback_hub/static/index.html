@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>反馈中枢 · Feedback Hub</title><link rel="stylesheet" href="assets/style.css"></head>
+<body><aside><div class="brand">◈ <span>反馈中枢<small>FEEDBACK HUB</small></span></div>
+<div class="workspace">游戏运营工作台<span>问题追踪与代码更新</span></div>
+<nav><button data-view="issues" class="active">◫　问题总览</button><button data-view="proposals">◇　修复审核</button>
+<button data-view="commits">↗　仓库动态</button><button data-view="faqs">≡　常见问题</button>
+<button data-view="blacklist">⊘　黑名单</button><button data-view="jobs">⌁　任务队列</button>
+<button data-view="audit">◷　操作记录</button></nav><div class="side-bottom">NoneBot × GitHub<br>多个仓库，共享一个问题库</div></aside>
+<main><header><div><div class="eyebrow">COMMUNITY / FEEDBACK</div><h1 id="heading">问题总览</h1></div>
+<div class="header-actions"><span id="connection">尚未连接</span><button id="refresh">刷新</button><button id="logout">退出</button></div></header>
+<section id="login" class="panel"><h2>连接管理工作台</h2><p>使用机器人管理员配置的令牌登录。令牌仅保存在当前页面内存中。</p>
+<form id="login-form"><input id="token" type="password" placeholder="管理令牌" autocomplete="off" required><button class="primary">连接</button></form></section>
+<div id="error" role="alert" hidden></div><section id="stats" class="stats"></section>
+<section id="toolbar"></section><section id="content"></section><footer>修复通知表示上游代码已修复，不代表已经部署上线。</footer></main>
+<dialog id="detail"><div id="detail-content"></div><button id="close-detail">关闭</button></dialog>
+<script src="assets/app.js" defer></script></body></html>
