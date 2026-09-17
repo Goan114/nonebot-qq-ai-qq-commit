@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS repo_state (
 );
 CREATE TABLE IF NOT EXISTS commits (
  repo TEXT NOT NULL, sha TEXT NOT NULL, summary TEXT NOT NULL, url TEXT NOT NULL,
- created REAL NOT NULL, PRIMARY KEY(repo, sha)
+ announce INTEGER NOT NULL DEFAULT 1, created REAL NOT NULL, PRIMARY KEY(repo, sha)
 );
 CREATE TABLE IF NOT EXISTS proposals (
  id INTEGER PRIMARY KEY, issue_id INTEGER NOT NULL REFERENCES issues(id), repo TEXT NOT NULL,
@@ -58,7 +58,19 @@ CREATE TABLE IF NOT EXISTS screenshots (
  model TEXT NOT NULL, analysis TEXT NOT NULL, created REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS screenshots_report ON screenshots(report_id);
-PRAGMA user_version=2;
+CREATE TABLE IF NOT EXISTS chat_messages (
+ id INTEGER PRIMARY KEY, group_id TEXT NOT NULL, qq TEXT NOT NULL, bot_id TEXT NOT NULL,
+ message_id TEXT NOT NULL, text TEXT NOT NULL, segments TEXT NOT NULL, created REAL NOT NULL,
+ UNIQUE(bot_id, group_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS chat_messages_group_time ON chat_messages(group_id, created);
+CREATE TABLE IF NOT EXISTS context_sessions (
+ id INTEGER PRIMARY KEY, owner_qq TEXT NOT NULL, group_id TEXT NOT NULL, bot_id TEXT NOT NULL,
+ trigger_message_id TEXT NOT NULL, started REAL NOT NULL, expires REAL NOT NULL,
+ state TEXT NOT NULL DEFAULT 'active'
+);
+CREATE INDEX IF NOT EXISTS context_sessions_active ON context_sessions(state, expires);
+PRAGMA user_version=3;
 """
 
 
@@ -72,9 +84,13 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=5000")
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 2:
+        if version > 3:
             raise RuntimeError("数据库版本高于当前程序，拒绝降级打开")
         self.conn.executescript(SCHEMA)
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(commits)")}
+        if "announce" not in columns:
+            self.conn.execute("ALTER TABLE commits ADD COLUMN announce INTEGER NOT NULL DEFAULT 1")
+        self.conn.execute("PRAGMA user_version=3")
 
     @contextmanager
     def transaction(self):

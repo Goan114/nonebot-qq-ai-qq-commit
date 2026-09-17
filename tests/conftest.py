@@ -43,7 +43,7 @@ def ai():
         summary="第三关黑屏",
     )
     mock.match.return_value = Match(confidence=0.1, reason="无匹配")
-    mock.commit.return_value = CommitAnalysis(summary="修复第三关黑屏")
+    mock.commit.return_value = CommitAnalysis(announce=True, summary="修复第三关黑屏")
     return mock
 
 

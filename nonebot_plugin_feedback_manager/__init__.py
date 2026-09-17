@@ -57,14 +57,34 @@ driver.on_shutdown(runtime.stop)
 async def enforce_blacklist(event: MessageEvent):
     if runtime.db.blocked(str(event.user_id)):
         raise IgnoredException("反馈系统黑名单：阻止该 QQ 与机器人交互")
+    if (
+        isinstance(event, GroupMessageEvent)
+        and str(event.group_id) in settings.feedback_groups
+        and str(event.user_id) != str(event.self_id)
+    ):
+        runtime.service.remember_chat_message(
+            qq=str(event.user_id),
+            group=str(event.group_id),
+            bot=str(event.self_id),
+            message_id=str(event.message_id),
+            text=event.get_plaintext(),
+            segments=[{"type": seg.type, "data": seg.data} for seg in event.message],
+        )
 
 
 async def allowed(event: GroupMessageEvent) -> bool:
     return str(event.group_id) in settings.feedback_groups
 
 
+async def record_request(event: GroupMessageEvent) -> bool:
+    return await allowed(event) and event.get_plaintext().strip().startswith("记录") and any(
+        seg.type == "at" for seg in event.message
+    )
+
+
 feedback = on_command("反馈", rule=allowed, priority=10, block=True)
 supplement = on_command("反馈补图", rule=allowed, priority=9, block=True)
+record_context = on_message(rule=record_request, permission=SUPERUSER, priority=2, block=True)
 listener = on_message(rule=allowed, priority=90, block=False)
 admin = on_command("反馈管理", permission=SUPERUSER, priority=1, block=True)
 
@@ -95,11 +115,64 @@ async def handle_feedback(bot: Bot, event: GroupMessageEvent):
 async def handle_message(bot: Bot, event: GroupMessageEvent):
     if str(event.user_id) == bot.self_id:
         return
+    text = event.get_plaintext().strip()
+    group, qq = str(event.group_id), str(event.user_id)
+    runtime.service.expire_context_sessions()
+    if text.startswith(("反馈:", "反馈：")):
+        started = runtime.service.start_live_context(
+            qq=qq, group=group, bot=bot.self_id, message_id=str(event.message_id)
+        )
+        runtime.service.notify(
+            f"context-start:{bot.self_id}:{group}:{event.message_id}",
+            group,
+            (
+                "已开始记录本群接下来 1 分钟的讨论。你可以继续补充设备、浏览器、复现步骤和异常现象；"
+                "仅发起人发送“ok”或“结束反馈”可提前提交。"
+                if started
+                else "你的反馈记录已经开启，可继续补充；发送“ok”或“结束反馈”可提前提交。"
+            ),
+            qq,
+            bot.self_id,
+        )
+        return
+    if (text.casefold() == "ok" or text in {"结束反馈", "停止反馈", "反馈结束"}) and runtime.service.finish_live_context(
+        group=group, qq=qq, stop_message_id=str(event.message_id)
+    ):
+        return
+    if runtime.service.active_context_session(group):
+        return
     # Commands belong to their respective plugins, not the passive AI listener.
     prefixes = tuple(p for p in driver.config.command_start if p)
     if prefixes and event.get_plaintext().startswith(prefixes):
         return
     await submit(bot, event, False)
+
+
+@record_context.handle()
+async def handle_record_context(bot: Bot, event: GroupMessageEvent):
+    targets = [
+        str(seg.data.get("qq", ""))
+        for seg in event.message
+        if seg.type == "at" and str(seg.data.get("qq", "")).isdigit()
+    ]
+    actor = str(event.user_id)
+    if len(targets) != 1 or targets[0] == actor:
+        response = "用法：记录@某人。机器人会回溯记录你与该用户在本群过去 5 分钟的聊天。"
+    else:
+        response = runtime.service.record_recent_context(
+            actor=actor,
+            target=targets[0],
+            group=str(event.group_id),
+            bot=bot.self_id,
+            command_message_id=str(event.message_id),
+        )
+    runtime.service.notice(
+        actor,
+        str(event.group_id),
+        bot.self_id,
+        str(event.message_id),
+        response,
+    )
 
 
 @supplement.handle()

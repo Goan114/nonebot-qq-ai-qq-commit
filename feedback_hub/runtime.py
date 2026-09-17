@@ -33,6 +33,7 @@ class Runtime:
             asyncio.create_task(self.work("commit")),
             asyncio.create_task(self.work("send")),
             asyncio.create_task(self.poll()),
+            asyncio.create_task(self.context_sessions()),
         ]
 
     async def stop(self):
@@ -120,6 +121,16 @@ class Runtime:
                 if self.active(job):
                     self.db.fail_job(job, error)
             await asyncio.sleep(0.5 if kind == "send" else 0)
+
+    async def context_sessions(self):
+        while True:
+            try:
+                self.service.expire_context_sessions()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Context session maintenance failed")
+            await asyncio.sleep(1)
 
     async def poll(self):
         due: dict[str, float] = {}

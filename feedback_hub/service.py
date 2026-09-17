@@ -187,6 +187,151 @@ class Service:
             {"group": group, "qq": qq, "bot": bot, "text": text, "notice": True},
         )
 
+    def remember_chat_message(
+        self,
+        *,
+        qq: str,
+        group: str,
+        bot: str,
+        message_id: str,
+        text: str,
+        segments: list,
+    ) -> None:
+        if group not in self.settings.feedback_groups or not text.strip():
+            return
+        now = time.time()
+        self.db.execute(
+            "INSERT OR IGNORE INTO chat_messages(group_id,qq,bot_id,message_id,text,segments,created) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (group, qq, bot, message_id, text, json.dumps(segments, ensure_ascii=False), now),
+        )
+        self.db.execute("DELETE FROM chat_messages WHERE created<?", (now - 600,))
+
+    @staticmethod
+    def _context_text(rows: list[dict]) -> str:
+        return "\n".join(f"QQ {row['qq']}: {row['text']}" for row in rows if row["text"].strip())
+
+    def _enqueue_context_feedback(
+        self,
+        *,
+        qq: str,
+        group: str,
+        bot: str,
+        message_id: str,
+        text: str,
+        mode: str,
+    ) -> bool:
+        if not text.strip() or self.db.blocked(qq):
+            return False
+        return self.db.enqueue(
+            "feedback",
+            f"context:{mode}:{bot}:{group}:{message_id}",
+            {
+                "qq": qq,
+                "group": group,
+                "bot": bot,
+                "message_id": message_id,
+                "text": text,
+                "segments": [{"type": "text", "data": {"text": text}}],
+                "explicit": True,
+                "issue_id": None,
+                "report_id": None,
+                "context_mode": mode,
+            },
+        )
+
+    def record_recent_context(
+        self,
+        *,
+        actor: str,
+        target: str,
+        group: str,
+        bot: str,
+        command_message_id: str,
+    ) -> str:
+        now = time.time()
+        rows = self.db.rows(
+            "SELECT qq,text FROM chat_messages WHERE group_id=? AND created>=? AND created<=? "
+            "AND qq IN (?,?) AND NOT (bot_id=? AND message_id=?) ORDER BY created,id",
+            (group, now - 300, now, actor, target, bot, command_message_id),
+        )
+        text = self._context_text(rows)
+        if not text:
+            return "过去 5 分钟没有找到你与该用户的可记录聊天。"
+        if not self._enqueue_context_feedback(
+            qq=target,
+            group=group,
+            bot=bot,
+            message_id=f"history:{command_message_id}",
+            text=text,
+            mode="history",
+        ):
+            return "这段记录无法加入反馈分析。"
+        return f"已记录过去 5 分钟内你与该用户的 {len(rows)} 条消息，正在分析。"
+
+    def active_context_session(self, group: str, owner_qq: str | None = None):
+        sql = "SELECT * FROM context_sessions WHERE group_id=? AND state='active'"
+        args: list[str] = [group]
+        if owner_qq is not None:
+            sql += " AND owner_qq=?"
+            args.append(owner_qq)
+        sql += " ORDER BY id LIMIT 1"
+        return self.db.one(sql, tuple(args))
+
+    def start_live_context(self, *, qq: str, group: str, bot: str, message_id: str) -> bool:
+        if self.active_context_session(group, qq):
+            return False
+        now = time.time()
+        trigger = self.db.one(
+            "SELECT created FROM chat_messages WHERE group_id=? AND bot_id=? AND message_id=?",
+            (group, bot, message_id),
+        )
+        started = trigger["created"] if trigger else now
+        self.db.execute(
+            "INSERT INTO context_sessions(owner_qq,group_id,bot_id,trigger_message_id,started,expires) "
+            "VALUES(?,?,?,?,?,?)",
+            (qq, group, bot, message_id, started, now + 60),
+        )
+        return True
+
+    def finish_live_context(self, *, group: str, qq: str, stop_message_id: str = "") -> bool:
+        session = self.active_context_session(group, qq)
+        if not session:
+            return False
+        now = time.time()
+        rows = self.db.rows(
+            "SELECT qq,text FROM chat_messages WHERE group_id=? AND created>=? AND created<=? "
+            "AND message_id!=? ORDER BY id",
+            (group, session["started"], min(now, session["expires"]), stop_message_id),
+        )
+        text = self._context_text(rows)
+        with self.db.transaction():
+            current = self.db.one("SELECT state FROM context_sessions WHERE id=?", (session["id"],))
+            if not current or current["state"] != "active":
+                return False
+            self.db.execute("UPDATE context_sessions SET state='done' WHERE id=?", (session["id"],))
+            if text:
+                self._enqueue_context_feedback(
+                    qq=qq,
+                    group=group,
+                    bot=session["bot_id"],
+                    message_id=f"live:{session['id']}",
+                    text=text,
+                    mode="live",
+                )
+        return True
+
+    def expire_context_sessions(self) -> int:
+        now = time.time()
+        rows = self.db.rows(
+            "SELECT group_id,owner_qq FROM context_sessions WHERE state='active' AND expires<=? ORDER BY id",
+            (now,),
+        )
+        count = sum(self.finish_live_context(group=row["group_id"], qq=row["owner_qq"]) for row in rows)
+        self.db.execute("DELETE FROM chat_messages WHERE created<?", (now - 600,))
+        self.db.execute("DELETE FROM context_sessions WHERE state!='active' AND expires<?", (now - 600,))
+        return count
+
     def ingest(
         self,
         *,
@@ -210,6 +355,9 @@ class Service:
             report = self.owned_report(issue_id, qq, group)
             if not report:
                 return "只能为你在本群提交过的未解决问题补图。"
+        key = f"feedback:{bot}:{group}:{message_id}"
+        if self.db.one("SELECT id FROM jobs WHERE dedup=?", (key,)):
+            return "duplicate"
         if (
             not explicit
             and not self.settings.feedback_listen_all
@@ -220,9 +368,6 @@ class Service:
             return "ignored"
         if len(text) > self.settings.feedback_max_message_chars:
             return "消息过长，请精简后提交。"
-        key = f"feedback:{bot}:{group}:{message_id}"
-        if self.db.one("SELECT id FROM jobs WHERE dedup=?", (key,)):
-            return "duplicate"
         # A screenshot supplement is a continuation of an existing report, so it
         # must not be blocked by a text feedback submitted a few seconds earlier.
         # Keep the same anti-spam cooldown, but apply it independently to normal
@@ -288,7 +433,10 @@ class Service:
         if p.get("issue_id") is not None:
             await self.process_supplement(job)
             return
-        result = await self.ai.triage(p["text"])
+        if p.get("context_mode"):
+            result = await self.ai.triage(p["text"], conversation=True, conversation_owner=p["qq"])
+        else:
+            result = await self.ai.triage(p["text"])
         visual, visual_note = None, ""
         if result.kind == "feedback" and image_segments(p["segments"]):
             visual, visual_note = await self.analyze_images(p["text"], p["segments"])
@@ -313,6 +461,7 @@ class Service:
                     self.settings.feedback_auto_ban
                     and result.confidence >= self.settings.feedback_ban_threshold
                     and p["qq"] not in self.superusers
+                    and not p.get("context_mode")
                 ):
                     self.ban(p["qq"], "AI: " + result.reason, "AI")
                 elif p["explicit"]:
@@ -508,15 +657,24 @@ class Service:
                 )
         self.db.audit(actor, "resolve", {"proposal_id": proposal_id, "issue_id": issue["id"]})
 
-    def announce_commit(self, payload: dict, summary: str, url: str):
+    @staticmethod
+    def brief_commit_summary(summary: str) -> str:
+        compact = " ".join(summary.split())
+        return compact if len(compact) <= 120 else compact[:119].rstrip("，,；;。 ") + "…"
+
+    def announce_commit(self, payload: dict, summary: str, url: str, announce: bool = True):
+        if not announce:
+            return
         branch = payload.get("branch", "")
-        target = f"{payload['repo']}@{branch}" if branch else payload["repo"]
+        repo_name = payload["repo"].rsplit("/", 1)[-1]
+        target = f"{repo_name} @ {branch}" if branch else repo_name
+        summary = self.brief_commit_summary(summary)
         for group in payload.get("groups", []):
             if group in self.settings.feedback_groups:
                 self.notify(
                     f"commit:{target}:{payload['sha']}:{group}",
                     group,
-                    f"仓库更新 · {target}\n{summary}\n{url}",
+                    f"【{target} 更新】\n【{url}】\n{summary}",
                 )
 
     async def analyze_commit(self, job: dict, github):
@@ -526,7 +684,7 @@ class Service:
             # The same SHA can arrive on another watched branch after a merge.
             # Reuse its analysis, but deliver each branch's announcement independently.
             with self.db.transaction():
-                self.announce_commit(p, cached["summary"], cached["url"])
+                self.announce_commit(p, cached["summary"], cached["url"], bool(cached["announce"]))
                 self.db.done(job["id"])
             return
         commit = await github.detail(p["repo"], p["sha"])
@@ -544,12 +702,18 @@ class Service:
             # A model cannot reference an issue from outside its supplied batch.
             analysis.fixes = [fix for fix in analysis.fixes if fix.issue_id in {i["id"] for i in batch}]
             analyses.append(analysis)
+        announcement = next(
+            (analysis for analysis in analyses if analysis.announce and analysis.fixes),
+            next((analysis for analysis in analyses if analysis.announce), analyses[0]),
+        )
+        should_announce = any(analysis.announce for analysis in analyses)
         with self.db.transaction():
+            summary = self.brief_commit_summary(announcement.summary)
             self.db.execute(
-                "INSERT INTO commits(repo,sha,summary,url,created) VALUES(?,?,?,?,?)",
-                (p["repo"], p["sha"], analyses[0].summary, commit["url"], time.time()),
+                "INSERT INTO commits(repo,sha,summary,url,announce,created) VALUES(?,?,?,?,?,?)",
+                (p["repo"], p["sha"], summary, commit["url"], 1 if should_announce else 0, time.time()),
             )
-            self.announce_commit(p, analyses[0].summary, commit["url"])
+            self.announce_commit(p, summary, commit["url"], should_announce)
             patches = {f["filename"]: f.get("patch", "") for f in commit["files"]}
             for analysis in analyses:
                 for fix in analysis.fixes:

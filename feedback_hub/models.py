@@ -53,5 +53,6 @@ class Fix(StrictModel):
 
 
 class CommitAnalysis(StrictModel):
+    announce: bool
     summary: str = Field(min_length=1, max_length=1500)
     fixes: list[Fix] = Field(default_factory=list, max_length=20)

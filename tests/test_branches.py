@@ -40,6 +40,7 @@ async def test_same_sha_on_two_branches_independent_jobs_and_cursors(db, setting
 async def test_cross_branch_announcements_reuse_ai_without_duplicate_fix(db, settings, service, ai):
     await service.process_feedback(feedback_job(service))
     ai.commit.return_value = CommitAnalysis(
+        announce=True,
         summary="修复黑屏",
         fixes=[
             Fix(
@@ -69,8 +70,8 @@ async def test_cross_branch_announcements_reuse_ai_without_duplicate_fix(db, set
     sends = db.rows("SELECT payload FROM jobs WHERE kind='send' AND dedup LIKE 'commit:%'")
     assert len(sends) == 3
     payloads = [json.loads(row["payload"]) for row in sends]
-    assert sum("o/r@main" in p["text"] for p in payloads) == 2
-    assert sum("o/r@develop" in p["text"] for p in payloads) == 1
+    assert sum("【r @ main 更新】" in p["text"] for p in payloads) == 2
+    assert sum("【r @ develop 更新】" in p["text"] for p in payloads) == 1
     fixed = db.rows("SELECT payload FROM jobs WHERE dedup LIKE 'resolved:%'")
     assert len(fixed) == 1
     assert "修复分支：develop" in fixed[0]["payload"]

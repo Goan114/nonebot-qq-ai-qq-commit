@@ -313,7 +313,7 @@ def test_v1_database_upgrades_without_losing_records(tmp_path):
     db.close()
     db = Database(path)
     assert db.one("SELECT answer FROM faqs")["answer"] == "answer"
-    assert db.one("PRAGMA user_version")["user_version"] == 2
+    assert db.one("PRAGMA user_version")["user_version"] == 3
     db.execute("INSERT INTO runtime_settings(key,value) VALUES('vision_enabled','true')")
     db.close()
     db = Database(path)

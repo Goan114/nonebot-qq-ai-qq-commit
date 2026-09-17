@@ -38,7 +38,7 @@ class Settings(BaseModel):
     feedback_resolve_threshold: float = Field(default=0.95, ge=0.8, le=1)
     feedback_auto_ban: bool = True
     feedback_ban_threshold: float = Field(default=0.98, ge=0.9, le=1)
-    feedback_listen_all: bool = True
+    feedback_listen_all: bool = False
     feedback_keywords: list[str] = [
         "卡顿",
         "黑屏",
