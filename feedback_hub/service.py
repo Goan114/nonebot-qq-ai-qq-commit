@@ -223,9 +223,19 @@ class Service:
         key = f"feedback:{bot}:{group}:{message_id}"
         if self.db.one("SELECT id FROM jobs WHERE dedup=?", (key,)):
             return "duplicate"
+        # A screenshot supplement is a continuation of an existing report, so it
+        # must not be blocked by a text feedback submitted a few seconds earlier.
+        # Keep the same anti-spam cooldown, but apply it independently to normal
+        # feedback and supplement jobs.
         latest = self.db.one(
             "SELECT created FROM jobs WHERE kind='feedback' AND "
-            "json_extract(payload,'$.qq')=? ORDER BY id DESC LIMIT 1",
+            "json_extract(payload,'$.qq')=? AND "
+            + (
+                "json_extract(payload,'$.issue_id') IS NOT NULL "
+                if issue_id is not None
+                else "json_extract(payload,'$.issue_id') IS NULL "
+            )
+            + "ORDER BY id DESC LIMIT 1",
             (qq,),
         )
         if latest and time.time() - latest["created"] < self.settings.feedback_cooldown_seconds:

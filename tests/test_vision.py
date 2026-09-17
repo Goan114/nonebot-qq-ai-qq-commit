@@ -156,6 +156,7 @@ async def test_provider_failure_falls_back_to_text(service, settings, db):
 
 async def test_supplement_ownership_and_does_not_increase_counts(service, settings, db):
     enable(service, settings)
+    settings.feedback_cooldown_seconds = 30
     await service.process_feedback(feedback_job(service))
     kwargs = {
         "group": "88888",
@@ -168,6 +169,7 @@ async def test_supplement_ownership_and_does_not_increase_counts(service, settin
     }
     assert "只能" in service.ingest(qq="23456", **kwargs)
     assert service.ingest(qq="12345", **kwargs) == "queued"
+    assert "提交过于频繁" in service.ingest(qq="12345", **{**kwargs, "message_id": "3"})
     job = db.one("SELECT * FROM jobs WHERE kind='feedback' ORDER BY id DESC")
     job["data"] = json.loads(job["payload"])
     await service.process_feedback(job)
